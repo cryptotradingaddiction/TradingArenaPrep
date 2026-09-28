@@ -210,6 +210,7 @@ class Exchange:
                 and (
                     fill.client_tag.startswith("mm_")
                     or fill.client_tag.startswith("dir_")
+                    or fill.client_tag.startswith("hybrid_")
                 )
             )
             if is_ours:

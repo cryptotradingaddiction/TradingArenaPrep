@@ -1,8 +1,8 @@
 """
 Submission-shaped strategy entry point.
 
-Day-to-day this dispatches to MM or directional helpers. Before contest, flatten
-the chosen helper into this file if the judge requires a single Python module.
+Day-to-day this dispatches to MM, directional, or hybrid helpers. Before contest,
+flatten the chosen helper into this file if the judge requires a single module.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import List, Protocol
 
 from bot.directional_imbalance import DirectionalImbalanceStrategy
+from bot.hybrid_mm_dir import HybridMMDirStrategy
 from bot.mm_inventory import MMInventoryStrategy
 from bot.types import BookTop, Fill, OrderRequest
 
@@ -32,9 +33,12 @@ class Strategy:
             self._inner: _Inner = MMInventoryStrategy()
         elif mode in {"dir", "directional", "imbalance"}:
             self._inner = DirectionalImbalanceStrategy()
+        elif mode == "hybrid":
+            self._inner = HybridMMDirStrategy()
         else:
             raise ValueError(
-                f"Unsupported strategy mode: {mode!r} (use 'mm' or 'directional')"
+                f"Unsupported strategy mode: {mode!r} "
+                f"(use 'mm', 'directional', or 'hybrid')"
             )
         self.mode = mode
 

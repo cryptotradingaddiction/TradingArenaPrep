@@ -36,13 +36,22 @@ def run(
     strat = build_strategy(strategy_name)
     rng = np.random.default_rng(seed + 7)
 
-    max_inv = 30.0 if strategy_name == "mm" else 25.0
+    if strategy_name == "directional":
+        max_inv = 25.0
+        base_size = 4.0
+    else:
+        # mm and hybrid share inventory scale
+        max_inv = 30.0
+        base_size = 5.0
+
     cfg = {
         "tick": tick,
         "initial_cash": ex.cfg.initial_cash,
         "gamma": 0.1,
         "k_spread": 1.5,
-        "base_size": 5.0 if strategy_name == "mm" else 4.0,
+        "kappa": 0.05,
+        "alpha": 0.5,
+        "base_size": base_size,
         "max_inventory": max_inv,
         "max_loss": 500.0,
         "imb_threshold": 0.15,
@@ -52,7 +61,7 @@ def run(
 
     for _ in range(steps):
         shock = feed.peek_shock()
-        # Predictive book skew only for directional — keep MM baseline honest
+        # Predictive book skew for directional + hybrid; MM stays honest (hint=0)
         if strategy_name == "mm":
             hint = 0.0
         else:
@@ -73,7 +82,6 @@ def run(
         strat.register_open(ex.open_order_ids())
         for f in ex.maybe_external_taker(feed.t):
             strat.on_fill(f)
-        # Exchange is source of truth — wipe any local drift
         strat.sync_state(ex.pos.qty, ex.pos.cash)
 
         mid = feed.step()
@@ -95,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--strategy",
         default="mm",
-        choices=["mm", "directional", "dir", "imbalance"],
+        choices=["mm", "directional", "dir", "imbalance", "hybrid"],
     )
     p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--seed", type=int, default=0)

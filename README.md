@@ -25,6 +25,12 @@ Directional (imbalance → mid lean):
 py -3 -m sim.runner --strategy directional --steps 1000 --seed 1
 ```
 
+Hybrid (MM quotes + imbalance skew, no taker):
+
+```bat
+py -3 -m sim.runner --strategy hybrid --steps 1000 --seed 1
+```
+
 ## Tests
 
 ```bat
@@ -36,6 +42,7 @@ py -3 -m unittest discover -s tests -v
 - `bot/strategy.py` — submission-shaped entry (`Strategy` callbacks)
 - `bot/mm_inventory.py` — Avellaneda–Stoikov-style MM with inventory skew
 - `bot/directional_imbalance.py` — imbalance signal → one-sided / taker lean
+- `bot/hybrid_mm_dir.py` — two-sided MM + faded imbalance skew (no taker)
 - `sim/` — fake price-time LOB, exchange, synthetic feed, runner
 
 ## Strategy contract
@@ -54,4 +61,5 @@ When the official Arena API lands, add an adapter that maps their callbacks onto
 
 1. Done: market making (spread + inventory skew)
 2. Done: directional imbalance → mid move (wired in runner)
-3. Later: hybrid MM + directional skew, official API adapter
+3. Done: hybrid MM + directional skew
+4. Later: official API adapter
