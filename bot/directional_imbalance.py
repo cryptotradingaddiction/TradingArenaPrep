@@ -37,6 +37,7 @@ class DirectionalConfig:
     max_loss: float = 500.0
     initial_cash: float = 10_000.0
     size_scale: float = 8.0          # size ≈ base + size_scale * |imb|
+    quote_every: int = 1
 
 
 def imbalance(top: BookTop) -> float:
@@ -58,6 +59,7 @@ class DirectionalImbalanceStrategy:
         self._start_equity = self.cfg.initial_cash
         self._stopped = False
         self.last_imb = 0.0
+        self._step = 0
 
     def on_start(self, config: dict) -> None:
         for k, v in config.items():
@@ -69,6 +71,7 @@ class DirectionalImbalanceStrategy:
         self._open_ids.clear()
         self._stopped = False
         self.last_imb = 0.0
+        self._step = 0
 
     def sync_state(self, qty: float, cash: float) -> None:
         """Overwrite local ledger from exchange (source of truth)."""
@@ -77,12 +80,15 @@ class DirectionalImbalanceStrategy:
 
     def on_book(self, top: BookTop, ts: float) -> List[OrderRequest]:
         _ = ts
+        self._step += 1
         if self._stopped:
             return self._cancel_all()
         equity = self.cash + self.inventory * top.mid
         if equity < self._start_equity - self.cfg.max_loss:
             self._stopped = True
             return self._cancel_all()
+        if self.cfg.quote_every > 1 and (self._step % self.cfg.quote_every) != 0:
+            return []
 
         imb = imbalance(top)
         self.last_imb = imb

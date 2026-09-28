@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -25,8 +25,10 @@ class ExchangeConfig:
     initial_cash: float = 10_000.0
     depth_levels: int = 5
     background_size: float = 50.0
-    taker_intensity: float = 0.35   # base prob of an aggressive hit each step
+    taker_intensity: float = 0.35
     taker_size_mean: float = 2.0
+    fee_bps: float = 1.0
+    adverse_half_ticks: float = 1.0
     seed: int = 0
 
 
@@ -36,6 +38,7 @@ class ExchangeMetrics:
 
     fills: int = 0
     strategy_fills: int = 0
+    fees_paid: float = 0.0
     inventory_path: List[float] = field(default_factory=list)
     equity_path: List[float] = field(default_factory=list)
     spread_captured: List[float] = field(default_factory=list)
@@ -51,6 +54,7 @@ class ExchangeMetrics:
         return {
             "fills_total": self.fills,
             "strategy_fills": self.strategy_fills,
+            "fees_paid": self.fees_paid,
             "final_inventory": self.inventory_path[-1] if self.inventory_path else 0.0,
             "final_equity": self.equity_path[-1] if self.equity_path else 0.0,
             "mean_spread_captured": (
@@ -69,14 +73,12 @@ def apply_trade(pos: Position, qty_delta: float, price: float) -> None:
         return
     price = float(price)
     qty_delta = float(qty_delta)
-    # Cash: buy pays, sell receives
     pos.cash -= price * qty_delta
 
     old_qty = pos.qty
     new_qty = old_qty + qty_delta
 
     if abs(old_qty) <= 1e-15:
-        # Flat → open
         pos.avg_entry = price
         pos.qty = new_qty
         return
@@ -88,24 +90,19 @@ def apply_trade(pos: Position, qty_delta: float, price: float) -> None:
         pos.qty = new_qty
         return
 
-    # Reducing or flipping
     closed = min(abs(old_qty), abs(qty_delta))
     if old_qty > 0:
-        # Closing long with sells
         pos.realized_pnl += (price - pos.avg_entry) * closed
     else:
-        # Closing short with buys
         pos.realized_pnl += (pos.avg_entry - price) * closed
 
     if abs(new_qty) <= 1e-12:
         pos.qty = 0.0
         pos.avg_entry = 0.0
     elif (old_qty > 0 and new_qty < 0) or (old_qty < 0 and new_qty > 0):
-        # Flip: residual opens at this fill price
         pos.qty = new_qty
         pos.avg_entry = price
     else:
-        # Partial reduce, same sign remains
         pos.qty = new_qty
 
 
@@ -124,10 +121,7 @@ class Exchange:
         self._peak_equity = self.cfg.initial_cash
 
     def seed_background(self, mid: float, imbalance_hint: float = 0.0) -> None:
-        """Rebuild deeper passive depth; optional size skew for directional sims.
-
-        ``imbalance_hint`` in roughly [-1, 1]: positive → more bid size (buy pressure).
-        """
+        """Rebuild deeper passive depth; optional size skew for directional sims."""
         self._mid = mid
         tick = self.cfg.tick
         base = self.cfg.background_size
@@ -177,8 +171,8 @@ class Exchange:
                         ts=fill.ts,
                         client_tag=order.client_tag,
                     )
-                    self._apply_fill(strat_fill, is_strategy=True)
-                    out.append(strat_fill)
+                    adj = self._apply_fill(strat_fill, is_strategy=True, adverse=False)
+                    out.append(adj if adj is not None else strat_fill)
         return out
 
     def cancel_all_strategy(self) -> None:
@@ -218,15 +212,83 @@ class Exchange:
                     o = self._open[fill.order_id]
                     if o.remaining <= 1e-12:
                         self._open.pop(fill.order_id, None)
-                self._apply_fill(fill, is_strategy=True)
-                strategy_fills.append(fill)
-                if fill.side is Side.BUY:
-                    self.metrics.spread_captured.append(self._mid - fill.price)
+                adj = self._apply_fill(fill, is_strategy=True, adverse=True)
+                used = adj if adj is not None else fill
+                strategy_fills.append(used)
+                if used.side is Side.BUY:
+                    self.metrics.spread_captured.append(self._mid - used.price)
                 else:
-                    self.metrics.spread_captured.append(fill.price - self._mid)
+                    self.metrics.spread_captured.append(used.price - self._mid)
             else:
                 self.metrics.fills += 1
         return strategy_fills
+
+    def force_flatten(self, mid: float, ts: float) -> List[Fill]:
+        """Cancel quotes and cross residual inventory at touch (taker, no adverse)."""
+        self.cancel_all_strategy()
+        qty = self.pos.qty
+        if abs(qty) <= 1e-12:
+            return []
+        top = self.book.top(ts=ts)
+        if top is None:
+            # No book — cash-settle at mid ± half tick
+            slip = 0.5 * self.cfg.tick
+            if qty > 0:
+                px = mid - slip
+                side = Side.SELL
+            else:
+                px = mid + slip
+                side = Side.BUY
+            fill = Fill(
+                order_id=self._new_id("flat"),
+                side=side,
+                price=px,
+                size=abs(qty),
+                ts=ts,
+                client_tag="flatten",
+            )
+            adj = self._apply_fill(fill, is_strategy=True, adverse=False)
+            return [adj if adj is not None else fill]
+
+        if qty > 0:
+            # Sell into bids
+            req = OrderRequest(
+                action=OrderAction.PLACE,
+                side=Side.SELL,
+                price=top.bid,
+                size=abs(qty),
+                client_tag="flatten",
+            )
+        else:
+            req = OrderRequest(
+                action=OrderAction.PLACE,
+                side=Side.BUY,
+                price=top.ask,
+                size=abs(qty),
+                client_tag="flatten",
+            )
+        fills = self.apply_requests([req], ts)
+        # Cancel any unfilled remainder resting from flatten attempt
+        self.cancel_all_strategy()
+        # If still open (thin book), cash-settle leftover
+        if abs(self.pos.qty) > 1e-9:
+            leftover = self.pos.qty
+            slip = 0.5 * self.cfg.tick
+            if leftover > 0:
+                px, side = mid - slip, Side.SELL
+            else:
+                px, side = mid + slip, Side.BUY
+            fill = Fill(
+                order_id=self._new_id("flat"),
+                side=side,
+                price=px,
+                size=abs(leftover),
+                ts=ts,
+                client_tag="flatten",
+            )
+            adj = self._apply_fill(fill, is_strategy=True, adverse=False)
+            fills.append(adj if adj is not None else fill)
+        return fills
 
     def mark(self, mid: float) -> float:
         self._mid = mid
@@ -258,14 +320,42 @@ class Exchange:
         self._next_id += 1
         return oid
 
-    def _apply_fill(self, fill: Fill, *, is_strategy: bool) -> None:
+    def _adverse_price(self, fill: Fill) -> float:
+        slip = 0.5 * self.cfg.tick * float(self.cfg.adverse_half_ticks)
+        if slip <= 0:
+            return fill.price
+        if fill.side is Side.BUY:
+            return fill.price + slip
+        return fill.price - slip
+
+    def _apply_fill(
+        self,
+        fill: Fill,
+        *,
+        is_strategy: bool,
+        adverse: bool = False,
+    ) -> Optional[Fill]:
         self.metrics.fills += 1
         if not is_strategy:
-            return
+            return None
         self.metrics.strategy_fills += 1
-        qty_delta = fill.size if fill.side is Side.BUY else -fill.size
-        apply_trade(self.pos, qty_delta, fill.price)
+        px = self._adverse_price(fill) if adverse else fill.price
+        adj = Fill(
+            order_id=fill.order_id,
+            side=fill.side,
+            price=px,
+            size=fill.size,
+            ts=fill.ts,
+            client_tag=fill.client_tag,
+        )
+        qty_delta = adj.size if adj.side is Side.BUY else -adj.size
+        apply_trade(self.pos, qty_delta, adj.price)
+        fee = (self.cfg.fee_bps / 1e4) * adj.price * adj.size
+        if fee > 0:
+            self.pos.cash -= fee
+            self.metrics.fees_paid += fee
         if fill.order_id in self._open:
             o = self._open[fill.order_id]
             if o.remaining <= 1e-12:
                 self._open.pop(fill.order_id, None)
+        return adj
