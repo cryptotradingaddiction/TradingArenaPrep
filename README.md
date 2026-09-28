@@ -13,6 +13,12 @@ py -3 -m pip install -r requirements.txt
 
 ## Run simulations
 
+Default strategy is **hybrid** (won mean equity vs MM on `--steps 500 --seeds 0-19`).
+
+```bat
+py -3 -m sim.runner --steps 1000 --seed 1
+```
+
 Market making (spread + inventory skew):
 
 ```bat

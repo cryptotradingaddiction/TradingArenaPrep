@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="ArenaPrep LOB simulator")
     p.add_argument(
         "--strategy",
-        default="mm",
+        default="hybrid",
         choices=["mm", "directional", "dir", "imbalance", "hybrid"],
     )
     p.add_argument("--steps", type=int, default=1000)
